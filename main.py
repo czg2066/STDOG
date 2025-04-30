@@ -217,8 +217,8 @@ class CustomTrain():
 
 if __name__ == "__main__":
     root_dir = "/media/czg/DriveLab_Datastorage/geely_data_radar_faild"
-    id = "v10_0430"
-    describe="v9效果良好，增加LateralInhibitionAttention"
+    id = "v10.1_0430"
+    describe="v10效果良好，但是车道一直不见效果，增加车道权重减小其他权重训练"
     save_path = "./trained_model/"+id+"/"
     os.makedirs(os.path.dirname(save_path), exist_ok=True) 
     os.makedirs(os.path.dirname(save_path+"plots/"), exist_ok=True)

@@ -102,7 +102,7 @@ class CustomModel(nn.Module):
             9,  # vehicle
             10,  # walker
         ]
-        self.bev_weight = torch.tensor([1.0, 1.5, 1.0, 1.5, 1.5, 1.0, 1.0, 1.0, 1.0, 3.0, 1.5])
+        self.bev_weight = torch.tensor([1.0, 1.2, 1.0, 1.2, 1.2, 1.0, 1.1, 1.1, 1.1, 1.2, 1.2])
         self.converter = [
         0,  # unlabeled, static, building, fence, other, pole, dynamic, water, terrain,\
         # wall, traffic sign, sky, ground, bridge, rail track, guard rail, vegetation
@@ -113,7 +113,7 @@ class CustomModel(nn.Module):
         1,  # vehicle
         3,  # traffic light
         ]   
-        self.semantic_weights = torch.tensor([1.0, 3.0, 1.0, 2.0, 1.0, 2.0, 1.0])
+        self.semantic_weights = torch.tensor([1.0, 1.2, 1.0, 1.1, 1.0, 1.1, 1.0])
         self.bev_semantic_loss = nn.CrossEntropyLoss(weight=self.bev_weight)
         self.depth_loss = nn.L1Loss()
         self.semantic_loss = nn.CrossEntropyLoss(weight=self.semantic_weights)
@@ -174,7 +174,7 @@ class CustomModel(nn.Module):
         depth_loss = torch.mean(depth_loss)
         return [semantic_loss, depth_loss, bev_semantic_loss]
 
-    def caclu_map(self, labels, weight=[0.5, 1.0, 1.5, 0.5]):
+    def caclu_map(self, labels, weight=[0.8, 1.0, 1.2, 0.8]):
         semantic_map_tiny = self.torch_dog_filter(labels, sigma1=0.8, sigma2=1.2, kernel_size=5)       #细小物体如车道线的DoG滤波器
         semantic_map_small = self.torch_dog_filter(labels, sigma1=1.2, sigma2=2.0, kernel_size=7)      #小型物体如人体的DoG滤波器
         semantic_map_mid = self.torch_dog_filter(labels, sigma1=1.5, sigma2=3.0, kernel_size=9)        #中型物体如车辆的DoG滤波器
