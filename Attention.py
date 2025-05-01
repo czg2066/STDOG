@@ -1,4 +1,4 @@
-import torch
+import torch, math
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -66,12 +66,14 @@ class LateralInhibitionAttention(nn.Module):
         return out
 
 class MultiScaleDiffusionAttention(nn.Module):
-    def __init__(self, embed_dim, num_heads, sigma_scales=[1.0, 2.0, 3.0, 4.0, 5.0], alphas=[0.1, 0.2, 0.3, 0.4, 0.5]):
+    def __init__(self, embed_dim, num_heads, sigma_scales=[1.0, 2.0, 3.0, 4.0, 5.0], alphas=[0.1, 0.2, 0.3, 0.4, 0.5],\
+                  num_queries=100):
         super().__init__()
         assert num_heads == len(sigma_scales) == len(alphas), "头数需与尺度参数匹配"
         assert embed_dim%num_heads == 0, "嵌入维度需能被头数整除"
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
+        self.embed_dim = embed_dim
         self.sigma_scales = sigma_scales
         self.alphas = alphas
         
@@ -82,8 +84,20 @@ class MultiScaleDiffusionAttention(nn.Module):
         
         # Q/K/V投影
         self.qkv = nn.Linear(embed_dim, 3 * embed_dim)
-        self.proj = nn.Linear(embed_dim, embed_dim)
         self.norm = nn.LayerNorm(embed_dim)
+
+        # 交叉注意力
+        self.cross_attn = nn.MultiheadAttention(embed_dim, num_heads)
+        self.pos_encoder = nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1) # 位置编码
+        self.num_queries = num_queries
+        self.queries= nn.Parameter(torch.randn(1, num_queries, embed_dim))
+        self.proj = nn.Linear(embed_dim*self.num_heads, embed_dim)
+        self.out_prof = nn.Linear(num_queries, 12*30)
+        self.query_norm = nn.LayerNorm(embed_dim)
+
+        # self.encoder_pos_encoding = PositionEmbeddingSine(self.config.gru_input_size // 2, normalize=True)
+        # self.row_embed = nn.Embedding(256, embed_dim)
+        # self.col_embed = nn.Embedding(256, embed_dim)
 
     def _get_gaussian_kernel(self, sigma, kernel_size=7):
         """生成2D高斯卷积核"""
@@ -126,11 +140,28 @@ class MultiScaleDiffusionAttention(nn.Module):
             head_outputs.append(head_out)
         # 合并多头结果
         out = torch.cat(head_outputs, dim=1).transpose(1, 2).reshape(B, N, C)
-        out = self.proj(out)
+        out = F.softmax(out, dim=-1)
+        # pos_coss = self.pos_encoder(out)
+        # 处理查询
+        queries = self.query_norm(self.queries)
+        queries = self.queries.repeat(B*self.num_heads, 1, 1)  # [B*num_heads, 50, 1512]
+        queries = queries.permute(1, 0, 2) # [50, B*num_heads, 1512]
+        # queries = queries.view(B, self.num_heads, self.num_queries, self.embed_dim).permute(2, 0, 1, 3).reshape(50, B*self.num_heads, -1)
+        # 处理输入特征
+        out = out.permute(1, 0, 2)  # [360, B, 1512]
+        out = out.repeat(1, self.num_heads, 1)  # [360, B*num_heads, 1512]
+        out, _ = self.cross_attn(
+            queries,
+            out,
+            out
+        )
+        out = out.permute(1, 0, 2).contiguous().view(B, self.num_queries, -1)
+        out = self.proj(out) # [B, self.num_queries, 1512]
+        out = self.out_prof(out.permute(0, 2, 1))
         # 恢复原始维度（如果输入是4D）
         if len(orig_shape) == 4:
             _, _, H, W = orig_shape
-            out = out.permute(0, 2, 1).view(B, C, H, W)
+            out = out.permute(0, 2, 1).contiguous().view(B, C, H, W)
         return out
 
 class TrafficParticipantCrossAttention(nn.Module):
@@ -149,6 +180,8 @@ class TrafficParticipantCrossAttention(nn.Module):
         # 空间位置编码
         self.pos_encoder = nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1, groups=embed_dim)
         self.prof = nn.Linear(num_queries, 12*30)
+        self.query_norm = nn.LayerNorm(embed_dim)
+        self.feat_norm = nn.LayerNorm(embed_dim)
         # 初始化
         nn.init.trunc_normal_(self.query_embed.weight, std=0.02)
         self._init_weights()
@@ -168,12 +201,14 @@ class TrafficParticipantCrossAttention(nn.Module):
         B, C, H, W = img_features.shape
         # 生成动态查询
         learned_queries = self.query_embed.weight.unsqueeze(0).expand(B, -1, -1)  # [B, N, C]
+        learned_queries = self.query_norm(learned_queries)
         learned_queries = self.query_proj(learned_queries)  # [B, num_queries, C]
         # 空间位置增强
         spatial_encoding = self.pos_encoder(img_features)  # [B, C, H, W]
         img_features = img_features + spatial_encoding
         # 展平图像特征
-        img_tokens = img_features.flatten(2).permute(0, 2, 1)  # [B, H*W, C]
+        img_tokens = img_features.view(B, C, H*W).permute(0, 2, 1)  # [B, H*W, C]
+        img_features = self.feat_norm(img_tokens)
         # 交叉注意力
         traffic_features, _ = self.cross_attn(
             query=learned_queries,
@@ -184,3 +219,43 @@ class TrafficParticipantCrossAttention(nn.Module):
         traffic_features = self.prof(traffic_features.permute(0, 2, 1)) # [B, H*W, C]
         traffic_features = traffic_features.view(B, C, H, W)  # [B, C, H, W]
         return traffic_features
+
+
+class PositionEmbeddingSine(nn.Module):
+  """
+  Taken from InterFuser
+  This is a more standard version of the position embedding, very similar to the one
+  used by the Attention is all you need paper, generalized to work on images.
+  """
+
+  def __init__(self, num_pos_feats=64, temperature=10000, normalize=False, scale=None):
+    super().__init__()
+    self.num_pos_feats = num_pos_feats
+    self.temperature = temperature
+    self.normalize = normalize
+    if scale is not None and normalize is False:
+      raise ValueError('normalize should be True if scale is passed')
+    if scale is None:
+      scale = 2 * math.pi
+    self.scale = scale
+
+  def forward(self, tensor):
+    x = tensor
+    bs, _, h, w = x.shape
+    not_mask = torch.ones((bs, h, w), device=x.device)
+    y_embed = not_mask.cumsum(1, dtype=torch.float32)
+    x_embed = not_mask.cumsum(2, dtype=torch.float32)
+    if self.normalize:
+      eps = 1e-6
+      y_embed = y_embed / (y_embed[:, -1:, :] + eps) * self.scale
+      x_embed = x_embed / (x_embed[:, :, -1:] + eps) * self.scale
+
+    dim_t = torch.arange(self.num_pos_feats, dtype=torch.float32, device=x.device)
+    dim_t = self.temperature**(2 * (torch.div(dim_t, 2, rounding_mode='floor')) / self.num_pos_feats)
+
+    pos_x = x_embed[:, :, :, None] / dim_t
+    pos_y = y_embed[:, :, :, None] / dim_t
+    pos_x = torch.stack((pos_x[:, :, :, 0::2].sin(), pos_x[:, :, :, 1::2].cos()), dim=4).flatten(3)
+    pos_y = torch.stack((pos_y[:, :, :, 0::2].sin(), pos_y[:, :, :, 1::2].cos()), dim=4).flatten(3)
+    pos = torch.cat((pos_y, pos_x), dim=3).permute(0, 3, 1, 2)
+    return pos
