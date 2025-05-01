@@ -1,7 +1,7 @@
 import torch, timm, cv2
 import torch.nn as nn
 import torch.nn.functional as F
-from Attention import LateralInhibitionAttention, MultiScaleDiffusionAttention
+from Attention import LateralInhibitionAttention, MultiScaleDiffusionAttention, TrafficQueryAttention
 from DSdecoder import PerspectiveDecoder
 
 class CustomModel(nn.Module):
@@ -27,6 +27,7 @@ class CustomModel(nn.Module):
             sigma_scales=[1.0, 2.0, 2.5, 3.0, 4.0, 5.0],
             alphas=[0.1, 0.2, 0.25, 0.3, 0.4, 0.5]
         )
+        self.TQ_attn = TrafficQueryAttention(embed_dim=backone_channels, num_queries=100, num_heads=6)
         self.bev_decoder = nn.Sequential(
             nn.Conv2d(
                 in_channels=backone_channels,
@@ -102,7 +103,7 @@ class CustomModel(nn.Module):
             9,  # vehicle
             10,  # walker
         ]
-        self.bev_weight = torch.tensor([1.0, 1.2, 1.0, 1.2, 1.2, 1.0, 1.1, 1.1, 1.1, 1.2, 1.2])
+        self.bev_weight = torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
         self.converter = [
         0,  # unlabeled, static, building, fence, other, pole, dynamic, water, terrain,\
         # wall, traffic sign, sky, ground, bridge, rail track, guard rail, vegetation
@@ -113,7 +114,7 @@ class CustomModel(nn.Module):
         1,  # vehicle
         3,  # traffic light
         ]   
-        self.semantic_weights = torch.tensor([1.0, 1.2, 1.0, 1.1, 1.0, 1.1, 1.0])
+        self.semantic_weights = torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
         self.bev_semantic_loss = nn.CrossEntropyLoss(weight=self.bev_weight)
         self.depth_loss = nn.L1Loss()
         self.semantic_loss = nn.CrossEntropyLoss(weight=self.semantic_weights)
@@ -137,6 +138,8 @@ class CustomModel(nn.Module):
         img_features = img_features + img_features_LIattn
         img_features_MSDattn = self.MSD_attn(img_features)
         img_features = img_features + img_features_MSDattn
+        img_features_TQattn = self.TQ_attn(img_features)
+        img_features = img_features + img_features_TQattn
         semantic_features = self.semantic_decoder(img_features)
         semantic_features = self.adaptive_pool(semantic_features)
         depth_features = self.depth_decoder(img_features)
@@ -174,7 +177,7 @@ class CustomModel(nn.Module):
         depth_loss = torch.mean(depth_loss)
         return [semantic_loss, depth_loss, bev_semantic_loss]
 
-    def caclu_map(self, labels, weight=[0.8, 1.0, 1.2, 0.8]):
+    def caclu_map(self, labels, weight=[1.0, 1.0, 1.0, 1.0]):
         semantic_map_tiny = self.torch_dog_filter(labels, sigma1=0.8, sigma2=1.2, kernel_size=5)       #细小物体如车道线的DoG滤波器
         semantic_map_small = self.torch_dog_filter(labels, sigma1=1.2, sigma2=2.0, kernel_size=7)      #小型物体如人体的DoG滤波器
         semantic_map_mid = self.torch_dog_filter(labels, sigma1=1.5, sigma2=3.0, kernel_size=9)        #中型物体如车辆的DoG滤波器
