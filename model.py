@@ -1,7 +1,7 @@
 import torch, timm, cv2
 import torch.nn as nn
 import torch.nn.functional as F
-from Attention import LateralInhibitionAttention, MultiScaleDiffusionAttention, TrafficQueryAttention
+from Attention import LateralInhibitionAttention, MultiScaleDiffusionAttention, TrafficParticipantCrossAttention
 from DSdecoder import PerspectiveDecoder
 
 class CustomModel(nn.Module):
@@ -27,7 +27,7 @@ class CustomModel(nn.Module):
             sigma_scales=[1.0, 2.0, 2.5, 3.0, 4.0, 5.0],
             alphas=[0.1, 0.2, 0.25, 0.3, 0.4, 0.5]
         )
-        self.TQ_attn = TrafficQueryAttention(embed_dim=backone_channels, num_queries=100, num_heads=6)
+        self.TQ_attn = TrafficParticipantCrossAttention(embed_dim=backone_channels, num_queries=100, num_heads=6)
         self.bev_decoder = nn.Sequential(
             nn.Conv2d(
                 in_channels=backone_channels,

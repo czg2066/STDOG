@@ -133,38 +133,54 @@ class MultiScaleDiffusionAttention(nn.Module):
             out = out.permute(0, 2, 1).view(B, C, H, W)
         return out
 
-class TrafficQueryAttention(nn.Module):
-    def __init__(self, embed_dim, num_queries=20, num_heads=8, H=12, W=30):
+class TrafficParticipantCrossAttention(nn.Module):
+    def __init__(self, embed_dim, num_queries=8, num_heads=8):
         super().__init__()
         self.num_queries = num_queries
-        self.query_embeds = nn.Parameter(torch.randn(num_queries, embed_dim))
-        # 注意力机制
-        self.self_attn = nn.MultiheadAttention(embed_dim, num_heads)
-        self.cross_attn = nn.MultiheadAttention(embed_dim, num_heads)
-        # 动态位置编码
-        self.pos_encoder = nn.Sequential(
-            nn.Conv2d(embed_dim, embed_dim, 3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(embed_dim, embed_dim, 3, padding=1)
+        self.query_embed = nn.Embedding(num_queries, embed_dim)
+        # 交叉注意力层
+        self.cross_attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
+        # 动态参数生成
+        self.query_proj = nn.Sequential(
+            nn.Linear(embed_dim, 4*embed_dim),
+            nn.GELU(),
+            nn.Linear(4*embed_dim, embed_dim)
         )
-        self.proj = nn.Linear(self.num_queries, H*W, bias=False)
+        # 空间位置编码
+        self.pos_encoder = nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1, groups=embed_dim)
+        self.prof = nn.Linear(num_queries, 12*30)
+        # 初始化
+        nn.init.trunc_normal_(self.query_embed.weight, std=0.02)
+        self._init_weights()
+
+    def _init_weights(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
 
     def forward(self, img_features):
-        """img_features: [B, C, H, W]"""
+        """
+        Args:
+            img_features: [B, C, H, W] 图像特征
+        Returns:
+            traffic_features: [B, num_queries, C] 交通参与者特征
+        """
         B, C, H, W = img_features.shape
-        # 生成位置编码
-        pos_emb = self.pos_encoder(img_features)  # [B, C, H, W]
-        pos_emb = pos_emb.view(B, C, H*W).permute(2, 0, 1)  # [H*W, B, C]
-        # 初始化查询
-        queries = self.query_embeds.unsqueeze(1).repeat(1, B, 1)  # [Q, B, C]
-        # 自注意力更新查询
-        queries, _ = self.self_attn(queries, queries, queries)  # 自适应的参与者关系建模
-        # 交叉注意力聚合图像特征
-        img_tokens = img_features.view(B, C, -1).permute(2, 0, 1)  # [H*W, B, C]
-        context, _ = self.cross_attn(
-            query=queries,
-            key=img_tokens + pos_emb,
-            value=img_tokens
-        )# [Q, B, C]
-        context = self.proj(context.permute(1, 2, 0)).view(B, C, H, W)  # [B, C, H, W]
-        return context
+        # 生成动态查询
+        learned_queries = self.query_embed.weight.unsqueeze(0).expand(B, -1, -1)  # [B, N, C]
+        learned_queries = self.query_proj(learned_queries)  # [B, num_queries, C]
+        # 空间位置增强
+        spatial_encoding = self.pos_encoder(img_features)  # [B, C, H, W]
+        img_features = img_features + spatial_encoding
+        # 展平图像特征
+        img_tokens = img_features.flatten(2).permute(0, 2, 1)  # [B, H*W, C]
+        # 交叉注意力
+        traffic_features, _ = self.cross_attn(
+            query=learned_queries,
+            key=img_tokens,
+            value=img_tokens,
+            need_weights=False
+        )
+        traffic_features = self.prof(traffic_features.permute(0, 2, 1)) # [B, H*W, C]
+        traffic_features = traffic_features.view(B, C, H, W)  # [B, C, H, W]
+        return traffic_features
