@@ -1,4 +1,4 @@
-import torch
+import torch, random
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 import os, sys, ujson, gzip, cv2
@@ -10,14 +10,20 @@ class CustomDataset(Dataset):
                root,
                skip_first = 5,
                seq_len = 1,
+               pred_len = 8,
+               wp_dilation = 1,
                rank=0):
     self.seq_len = seq_len
+    self.pred_len = pred_len
+    self.wp_dilation = wp_dilation
     self.img_h = 320
     self.img_w = 180
     self.images = []
     self.semantics = []
     self.bev_semantics = []
     self.depth = []
+    self.measurements = []
+    self.sample_start = []
     self.cam_name = ["front_left", "front_right", "front_wide", "rear_left", "rear_right", "rear"] 
     self.rgb_name = ["rgb_"+i for i in self.cam_name] 
     self.semantics_name = ["semantic_"+i for i in self.cam_name] 
@@ -49,12 +55,13 @@ class CustomDataset(Dataset):
 
         num_seq = len(os.listdir(route_dir + '/rgb'))
 
-        for seq in range(skip_first, num_seq - self.seq_len):
+        for seq in range(skip_first, num_seq - self.seq_len - self.pred_len):
           # load input seq and pred seq jointly
           image = []
           semantic = []
           bev_semantic = []
           depth = []
+          measurement = []
 
           # Loads the current (and past) frames (if seq_len > 1)
           for idx in range(self.seq_len):
@@ -70,6 +77,9 @@ class CustomDataset(Dataset):
               image.append(image_i)
               semantic.append(semantic_i)
               depth.append(depth_i)
+          measurement.append(route_dir + '/measurements')
+          self.measurements.append(measurement)
+          self.sample_start.append(seq)
           self.images.append(image)
           self.semantics.append(semantic)
           self.bev_semantics.append(bev_semantic)
@@ -86,6 +96,8 @@ class CustomDataset(Dataset):
     self.semantics = np.array(self.semantics).astype(np.bytes_)
     self.bev_semantics = np.array(self.bev_semantics).astype(np.bytes_)
     self.depth = np.array(self.depth).astype(np.bytes_)
+    self.measurements = np.array(self.measurements).astype(np.string_)
+    self.sample_start = np.array(self.sample_start)
 
     self.perspective_downsample_factor = 1
     self.converter = [
@@ -144,17 +156,45 @@ class CustomDataset(Dataset):
     semantics = self.semantics[idx]
     bev_semantics = self.bev_semantics[idx]
     depth = self.depth[idx]
+    measurements = self.measurements[idx]
+    sample_start = self.sample_start[idx]
     images_i = []
     semantics_i = []
     depth_i = []
     bev_semantics_i = []
+    loaded_measurements = []
+    end = self.pred_len + self.seq_len
+    start = self.seq_len
+    for i in range(self.seq_len):
+      measurement_file = str(measurements[0], encoding='utf-8') + (f'/{(sample_start + i):04}.json.gz')
+      with gzip.open(measurement_file, 'rt', encoding='utf-8') as f1:
+        measurements_i = ujson.load(f1)
+      loaded_measurements.append(measurements_i)
+    for i in range(start, end, self.wp_dilation):
+      measurement_file = str(measurements[0], encoding='utf-8') + (f'/{(sample_start + i):04}.json.gz')
+      with gzip.open(measurement_file, 'rt', encoding='utf-8') as f1:
+        measurements_i = ujson.load(f1)
+      loaded_measurements.append(measurements_i)
+    current_measurement = loaded_measurements[self.seq_len - 1]
+    indices = []
+    for i in range(0, self.pred_len, self.wp_dilation):
+      indices.append(i)
+    if random.random() < 0.5:
+      aug_translation = current_measurement['augmentation_translation']
+      aug_rotation = current_measurement['augmentation_rotation']
+    else:
+      aug_translation = 0.0
+      aug_rotation = 0.0
+    waypoints = self.get_waypoints(loaded_measurements[self.seq_len - 1:],
+                                    y_augmentation=aug_translation,
+                                    yaw_augmentation=aug_rotation)
     for i in range(self.seq_len):
         mimages_list = []
         mdepth_list = []
         msemantics_list = []
         for j in range(len(self.cam_name)):
             mimages_i = cv2.imread(str(images[i][j], encoding='utf-8'), cv2.IMREAD_COLOR)
-            mimages_i = cv2.resize(mimages_i, (self.img_h, self.img_w), interpolation=cv2.INTER_AREA)
+            mimages_i = cv2.resize(mimages_i, (self.img_h+16*2, self.img_w+9*2), interpolation=cv2.INTER_AREA)
             mimages_i = cv2.cvtColor(mimages_i, cv2.COLOR_BGR2RGB)
             mimages_i = np.transpose(mimages_i, (2, 0, 1))
             mimages_list.append(mimages_i)
@@ -167,10 +207,10 @@ class CustomDataset(Dataset):
 
             mdepth_i = cv2.imread(str(depth[i][j], encoding='utf-8'), cv2.IMREAD_UNCHANGED)
             mdepth_i = cv2.resize(mdepth_i, (self.img_h, self.img_w), interpolation=cv2.INTER_AREA)
-            mdepth_i = cv2.resize(mdepth_i,
-                        dsize=(mdepth_i.shape[1] // self.perspective_downsample_factor,
-                                mdepth_i.shape[0] // self.perspective_downsample_factor),
-                        interpolation=cv2.INTER_LINEAR)
+            # mdepth_i = cv2.resize(mdepth_i,
+            #             dsize=(mdepth_i.shape[1] // self.perspective_downsample_factor,
+            #                     mdepth_i.shape[0] // self.perspective_downsample_factor),
+            #             interpolation=cv2.INTER_LINEAR)
             mdepth_i = mdepth_i.astype(np.float32) / 255.0
             mdepth_list.append(mdepth_i)
         mbev_semantics_i = cv2.imread(str(bev_semantics[i], encoding='utf-8'), cv2.IMREAD_UNCHANGED)
@@ -179,11 +219,41 @@ class CustomDataset(Dataset):
         semantics_i.append(msemantics_list)
         depth_i.append(mdepth_list)
         bev_semantics_i.append(mbev_semantics_i)
-    data['images'] = images_i
-    data['semantics'] = semantics_i
-    data['depth'] = depth_i
-    data['bev_semantics'] = bev_semantics_i
+    data['images'] = np.array(images_i, dtype=np.float32)
+    data['semantics'] = np.array(semantics_i, dtype=np.int64)
+    data['depth'] = np.array(depth_i, dtype=np.float32)
+    data['bev_semantics'] = np.array(bev_semantics_i, dtype=np.int64)
+    data['ego_waypoints'] = np.array(waypoints)
+
     return data
+
+  def get_waypoints(self, measurements, y_augmentation=0.0, yaw_augmentation=0.0):
+    """transform waypoints to be origin at ego_matrix"""
+    origin = measurements[0]
+    origin_matrix = np.array(origin['ego_matrix'])[:3]
+    origin_translation = origin_matrix[:, 3:4]
+    origin_rotation = origin_matrix[:, :3]
+
+    waypoints = []
+    for index in range(self.seq_len, len(measurements)):
+      waypoint = np.array(measurements[index]['ego_matrix'])[:3, 3:4]
+      waypoint_ego_frame = origin_rotation.T @ (waypoint - origin_translation)
+      # Drop the height dimension because we predict waypoints in BEV
+      waypoints.append(waypoint_ego_frame[:2, 0])
+
+    # Data augmentation
+    waypoints_aug = []
+    aug_yaw_rad = np.deg2rad(yaw_augmentation)
+    rotation_matrix = np.array([[np.cos(aug_yaw_rad), -np.sin(aug_yaw_rad)], [np.sin(aug_yaw_rad),
+                                                                              np.cos(aug_yaw_rad)]])
+
+    translation = np.array([[0.0], [y_augmentation]])
+    for waypoint in waypoints:
+      pos = np.expand_dims(waypoint, axis=1)
+      waypoint_aug = rotation_matrix.T @ (pos - translation)
+      waypoints_aug.append(np.squeeze(waypoint_aug))
+
+    return waypoints_aug
 
 if __name__ == "__main__":
     root_dir = "/media/czg/DriveLab_Datastorage/geely_data(failed)"

@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from Attention import LateralInhibitionAttention, MultiScaleDiffusionAttention, TrafficParticipantCrossAttention
 from DSdecoder import PerspectiveDecoder
+from STAttention import STTransformerWithDeformableAttention
 
 class CustomModel(nn.Module):
     def __init__(self):
@@ -14,33 +15,44 @@ class CustomModel(nn.Module):
             pretrained=True,
             features_only=True,
         )
-        backone_channels = self.backbone.feature_info.channels()[-1]
-        self.LI_attn = LateralInhibitionAttention(
-            embed_dim=backone_channels,
-            num_heads=3,
-            beta=0.2,
-            neighbor_size=3
+        backbone_channels = self.backbone.feature_info.channels() # [c1, c2, c3, c4, c5]
+        
+        # 假设我们使用后4个尺度的特征
+        input_channels = backbone_channels[-4:] # [c2, c3, c4, c5]
+        d_model = 256 # Transformer的维度
+        
+        # 添加一个 1x1 卷积层来统一通道数
+        self.input_proj = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(in_ch, d_model, kernel_size=1),
+                nn.GroupNorm(32, d_model),
+            ) for in_ch in input_channels
+        ])
+        self.st_transformer = STTransformerWithDeformableAttention(
+            d_model=d_model,
+            n_heads=4,
+            num_layers=2,
+            num_agent_queries=50,
+            num_map_queries=50,
+            num_plan_queries=8,
+            n_levels=len(input_channels),
+            n_points=8,
+            d_ffn=d_model,
+            dropout=0.1
         )
-        self.MSD_attn = MultiScaleDiffusionAttention(
-            embed_dim=backone_channels,
-            num_heads=6,
-            sigma_scales=[1.0, 2.0, 2.5, 3.0, 4.0, 5.0],
-            alphas=[0.1, 0.2, 0.25, 0.3, 0.4, 0.5]
-        )
-        self.TQ_attn = TrafficParticipantCrossAttention(embed_dim=backone_channels, num_queries=100, num_heads=6)
         self.bev_decoder = nn.Sequential(
             nn.Conv2d(
-                in_channels=backone_channels,
-                out_channels=backone_channels,
+                in_channels=d_model,
+                out_channels=d_model,
                 kernel_size=(3, 3), 
                 stride=1,
                 padding=1,
                 bias=True
             ),
-            nn.BatchNorm2d(backone_channels),
+            nn.BatchNorm2d(d_model),
             nn.ReLU(inplace=True),
             nn.Conv2d(
-               in_channels=backone_channels,
+               in_channels=d_model,
                out_channels=self.bev_converter_class,
                kernel_size=(1, 1),
                stride=1,
@@ -49,14 +61,24 @@ class CustomModel(nn.Module):
             ),
             nn.Upsample(size=(256, 256), mode='bilinear', align_corners=False),
         )
-        self.depth_decoder = PerspectiveDecoder(in_channels=backone_channels,
+        # 上采用query到map大小 
+        self.query_to_map = nn.Sequential(
+            nn.Conv2d(d_model, d_model, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+            nn.Conv2d(d_model, d_model // 2, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+            nn.Conv2d(d_model // 2, d_model, kernel_size=1)
+        )
+        self.depth_decoder = PerspectiveDecoder(in_channels=backbone_channels[-1],
                                                out_channels=1,
                                                inter_channel_0=512,
                                                inter_channel_1=128,
                                                inter_channel_2=32,
                                                scale_factor_0=8,
                                                scale_factor_1=4)
-        self.semantic_decoder = PerspectiveDecoder(in_channels=backone_channels,
+        self.semantic_decoder = PerspectiveDecoder(in_channels=backbone_channels[-1],
                                                   out_channels=self.converter_class,
                                                   inter_channel_0=512,
                                                   inter_channel_1=128,
@@ -64,32 +86,40 @@ class CustomModel(nn.Module):
                                                   scale_factor_0=8,
                                                   scale_factor_1=4)
         self.adaptive_pool = torch.nn.AdaptiveAvgPool2d((360, 960))
-        self.top_down = nn.Sequential(
-            nn.Conv2d(
-                in_channels=backone_channels,
-                out_channels=backone_channels,
-                kernel_size=(1, 1)
-            ),
+        
+        self.trajectory_decoder = nn.Sequential(
+            nn.Linear(d_model, d_model // 2),
             nn.ReLU(inplace=True),
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
-            nn.Conv2d(
-                in_channels=backone_channels,
-                out_channels=backone_channels,
-                kernel_size=(3, 3),
-                stride=2,
-                padding=1
-            ),
+            nn.Linear(d_model // 2, d_model // 4),
             nn.ReLU(inplace=True),
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
-            nn.Conv2d(
-                in_channels=backone_channels,
-                out_channels=backone_channels,
-                kernel_size=(3, 3),
-                stride=2,
-                padding=1
-            ),
-            nn.ReLU(inplace=True)
+            nn.Linear(d_model // 4, 2)  # 输出 (x, y)
         )
+        # self.top_down = nn.Sequential(
+        #     nn.Conv2d(
+        #         in_channels=d_model,
+        #         out_channels=d_model,
+        #         kernel_size=(1, 1)
+        #     ),
+        #     nn.ReLU(inplace=True),
+        #     nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+        #     nn.Conv2d(
+        #         in_channels=d_model,
+        #         out_channels=d_model,
+        #         kernel_size=(3, 3),
+        #         stride=2,
+        #         padding=1
+        #     ),
+        #     nn.ReLU(inplace=True),
+        #     nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+        #     nn.Conv2d(
+        #         in_channels=d_model,
+        #         out_channels=d_model,
+        #         kernel_size=(3, 3),
+        #         stride=2,
+        #         padding=1
+        #     ),
+        #     nn.ReLU(inplace=True)
+        # )
         self.bev_converter = [
             0,  # unlabeled
             1,  # road
@@ -118,6 +148,7 @@ class CustomModel(nn.Module):
         self.bev_semantic_loss = nn.CrossEntropyLoss(weight=self.bev_weight)
         self.depth_loss = nn.L1Loss()
         self.semantic_loss = nn.CrossEntropyLoss(weight=self.semantic_weights)
+        self.trajectory_loss = nn.L1Loss()
 
 
     def forward(self, x):
@@ -130,23 +161,48 @@ class CustomModel(nn.Module):
         # back_row = torch.cat([img_features[3], img_features[5], img_features[4]], dim=3)
         # img_features = torch.cat([front_row, back_row], dim=2)
         # del front_row, back_row
-        img_features = self.backbone(x)
-        img_features = img_features[-1]
-        img_features_td = self.top_down(img_features)
-        img_features = img_features + img_features_td
-        img_features_LIattn = self.LI_attn(img_features)
-        img_features = img_features + img_features_LIattn
-        # img_features_MSDattn = self.MSD_attn(img_features)
-        # img_features = img_features + img_features_MSDattn
-        # img_features_TQattn = self.TQ_attn(img_features)
-        # img_features = img_features + img_features_TQattn
-        semantic_features = self.semantic_decoder(img_features)
+        x = x.contiguous()
+        backbone_features = self.backbone(x)[-4:] # 取后4个尺度的特征
+        
+        # 2. 统一通道数并收集 spatial_shapes
+        srcs = []
+        spatial_shapes_list = []
+        for i, feature in enumerate(backbone_features):
+            # (N, C_in, H, W) -> (N, d_model, H, W)
+            feature = feature.contiguous()
+            proj_feature = self.input_proj[i](feature)
+            srcs.append(proj_feature)
+            spatial_shapes_list.append(proj_feature.shape[-2:])
+        spatial_shapes = torch.as_tensor(spatial_shapes_list, dtype=torch.long, device=x.device)
+        # 计算每个尺度特征图展平后的起始索引
+        # level_start_index = torch.cat((spatial_shapes.new_zeros((1,)), spatial_shapes.prod(1).cumsum(0)[:-1]))
+        # 将所有尺度的特征图展平并拼接
+        # (N, d_model, H, W) -> (N, H*W, d_model)
+        flattened_srcs = [src.flatten(2).permute(0, 2, 1) for src in srcs]
+        # 拼接成 (N, sum(H*W), d_model)
+        feature_maps_3d = torch.cat(flattened_srcs, dim=1)
+        feature_maps_3d = feature_maps_3d.permute(1, 0, 2)
+        # img_features = torch.cat(img_features, dim=1)
+        agent_query, map_query, plan_query = self.st_transformer(feature_maps_3d, spatial_shapes)
+        agent_query_reshaped = agent_query.permute(0, 2, 1)
+        N, C, _ = agent_query_reshaped.shape
+        H_q, W_q = 5, 10
+        agent_query_image = agent_query_reshaped.view(N, C, H_q, W_q)
+        # plan_query_reshaped = plan_query.permute(0, 2, 1)
+        # N_p, C_p, Lq_p = plan_query_reshaped.shape
+        # H_p, W_p = 3, 8
+        # plan_query_image = plan_query_reshaped.view(N_p, C_p, H_p, W_p)
+        # img_features_td = self.top_down(img_features)
+        # img_features = img_features + img_features_td
+        semantic_features = self.semantic_decoder(backbone_features[-1])
         semantic_features = self.adaptive_pool(semantic_features)
-        depth_features = self.depth_decoder(img_features)
+        depth_features = self.depth_decoder(backbone_features[-1])
         depth_features = self.adaptive_pool(depth_features)
         depth_features = torch.sigmoid(depth_features).squeeze(1)
-        bev_features = self.bev_decoder(img_features)
-        return semantic_features, depth_features, bev_features, None
+        map_features = self.query_to_map(agent_query_image)
+        bev_features = self.bev_decoder(map_features)
+        trajectory_features = self.trajectory_decoder(plan_query)
+        return semantic_features, depth_features, bev_features, trajectory_features
     
     def check_tensor_integrity(self, tensor, name):
         if torch.isnan(tensor).any():
@@ -156,7 +212,7 @@ class CustomModel(nn.Module):
         if not tensor.is_contiguous():
             print(f"警告: {name} 内存不连续")
 
-    def loss_all(self, semantic_features, depth_features, bev_features, trajectory_features, semantic_labels, depth_labels, bev_labels, ego_waypoint):
+    def loss_all(self, semantic_features, depth_features, bev_features, trajectory_features, semantic_labels, depth_labels, bev_labels, ego_waypoints):
         semantic_loss = self.semantic_loss(semantic_features, semantic_labels)
         weight_matrix = self.caclu_map(semantic_labels)
         semantic_loss = semantic_loss * weight_matrix
@@ -175,7 +231,9 @@ class CustomModel(nn.Module):
         weight_matrix = self.caclu_map(depth_labels)
         depth_loss = depth_loss * weight_matrix
         depth_loss = torch.mean(depth_loss)
-        return [semantic_loss, depth_loss, bev_semantic_loss]
+        trajectory_loss = self.trajectory_loss(trajectory_features, ego_waypoints)
+        trajectory_loss = torch.mean(trajectory_loss)
+        return [semantic_loss, depth_loss, bev_semantic_loss, trajectory_loss]
 
     def caclu_map(self, labels, weight=[1.0, 1.0, 1.0, 1.0]):
         semantic_map_tiny = self.torch_dog_filter(labels, sigma1=0.8, sigma2=1.2, kernel_size=5)       #细小物体如车道线的DoG滤波器

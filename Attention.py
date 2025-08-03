@@ -92,7 +92,7 @@ class MultiScaleDiffusionAttention(nn.Module):
         self.num_queries = num_queries
         self.queries= nn.Parameter(torch.randn(1, num_queries, embed_dim))
         self.proj = nn.Linear(embed_dim*self.num_heads, embed_dim)
-        self.out_prof = nn.Linear(num_queries, 12*30)
+        self.out_prof = nn.Linear(429, 12*30)
         self.query_norm = nn.LayerNorm(embed_dim)
 
         # self.encoder_pos_encoding = PositionEmbeddingSine(self.config.gru_input_size // 2, normalize=True)
@@ -140,23 +140,23 @@ class MultiScaleDiffusionAttention(nn.Module):
             head_outputs.append(head_out)
         # 合并多头结果
         out = torch.cat(head_outputs, dim=1).transpose(1, 2).reshape(B, N, C)
-        out = F.softmax(out, dim=-1)
-        # pos_coss = self.pos_encoder(out)
-        # 处理查询
-        queries = self.query_norm(self.queries)
-        queries = self.queries.repeat(B*self.num_heads, 1, 1)  # [B*num_heads, 50, 1512]
-        queries = queries.permute(1, 0, 2) # [50, B*num_heads, 1512]
-        # queries = queries.view(B, self.num_heads, self.num_queries, self.embed_dim).permute(2, 0, 1, 3).reshape(50, B*self.num_heads, -1)
-        # 处理输入特征
-        out = out.permute(1, 0, 2)  # [360, B, 1512]
-        out = out.repeat(1, self.num_heads, 1)  # [360, B*num_heads, 1512]
-        out, _ = self.cross_attn(
-            queries,
-            out,
-            out
-        )
-        out = out.permute(1, 0, 2).contiguous().view(B, self.num_queries, -1)
-        out = self.proj(out) # [B, self.num_queries, 1512]
+        # out = F.softmax(out, dim=-1)
+        # # pos_coss = self.pos_encoder(out)
+        # # 处理查询
+        # queries = self.query_norm(self.queries)
+        # queries = self.queries.repeat(B*self.num_heads, 1, 1)  # [B*num_heads, 50, 1512]
+        # queries = queries.permute(1, 0, 2) # [50, B*num_heads, 1512]
+        # # queries = queries.view(B, self.num_heads, self.num_queries, self.embed_dim).permute(2, 0, 1, 3).reshape(50, B*self.num_heads, -1)
+        # # 处理输入特征
+        # out = out.permute(1, 0, 2)  # [360, B, 1512]
+        # out = out.repeat(1, self.num_heads, 1)  # [360, B*num_heads, 1512]
+        # out, _ = self.cross_attn(
+        #     queries,
+        #     out,
+        #     out
+        # )
+        # out = out.permute(1, 0, 2).contiguous().view(B, self.num_queries, -1)
+        # out = self.proj(out) # [B, self.num_queries, 1512]
         out = self.out_prof(out.permute(0, 2, 1))
         # 恢复原始维度（如果输入是4D）
         if len(orig_shape) == 4:
