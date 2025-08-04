@@ -37,7 +37,8 @@ class CustomTrain():
             self.model = DDP(self.model, device_ids=[self.rank], output_device=self.rank, find_unused_parameters=True)
         else:
             self.model = nn.DataParallel(self.model)
-        wandb.init(project="Dog_new", name=save_path.split('/')[-2], notes=describe, id=save_path.split('/')[-2], resume="allow")
+        if self.rank == 0:
+            wandb.init(project="Dog_new", name=save_path.split('/')[-2], notes=describe, id=save_path.split('/')[-2], resume="allow")
 
     def resume_model(self, save_path):
         files = os.listdir(save_path)
@@ -109,25 +110,26 @@ class CustomTrain():
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5.0)
                 self.optimizer.step()
                 # 实时更新进度条信息
-                progress.set_postfix({
-                    'losses': f"{total_loss.item():.4f}",
-                    'semloss': f"{loss[0].item():.4f}",
-                    'deploss': f"{loss[1].item():.4f}",
-                    'bevloss': f"{loss[2].item():.4f}",
-                    'trajloss': f"{loss[3].item():.4f}" if len(loss) >= 4 else "None",
-                    'lr': f"{self.optimizer.param_groups[0]['lr']:.2e}"
-                })
-                if self.all_step % ((int(len(dataset)/self.batch_size)+1)//100) == 0:
-                    wandb.log({
-                        "epoch": self.epoch,
-                        "step": self.all_step,
-                        "loss": total_loss.item(),
-                        "semloss": loss[0].item(),
-                        "deploss": loss[1].item(),
-                        "bevloss": loss[2].item(),
-                        'trajloss': loss[3].item() if len(loss) >= 4 else "None",
-                        "lr": self.optimizer.param_groups[0]['lr']
+                if self.rank == 0:
+                    progress.set_postfix({
+                        'losses': f"{total_loss.item():.4f}",
+                        'semloss': f"{loss[0].item():.4f}",
+                        'deploss': f"{loss[1].item():.4f}",
+                        'bevloss': f"{loss[2].item():.4f}",
+                        'trajloss': f"{loss[3].item():.4f}" if len(loss) >= 4 else "None",
+                        'lr': f"{self.optimizer.param_groups[0]['lr']:.2e}"
                     })
+                    if self.all_step % ((int(len(dataset)/self.batch_size)+1)//100) == 0:
+                        wandb.log({
+                            "epoch": self.epoch,
+                            "step": self.all_step,
+                            "loss": total_loss.item(),
+                            "semloss": loss[0].item(),
+                            "deploss": loss[1].item(),
+                            "bevloss": loss[2].item(),
+                            'trajloss': loss[3].item() if len(loss) >= 4 else "None",
+                            "lr": self.optimizer.param_groups[0]['lr']
+                        })
                 self.all_step += 1
             
             torch.save({
@@ -252,13 +254,13 @@ if __name__ == "__main__":
     torch.backends.cudnn.enabled = False
     if DDP_or_DP == "DDP":
         rank = int(os.environ["LOCAL_RANK"])
-        dist.init_process_group(backend="gloo")
+        dist.init_process_group(backend="nccl")
         torch.cuda.set_device(rank)
         print(f"[Rank {dist.get_rank()}] Initialization finished. Using GPU: {rank}")
     else:
-        rank = None
+        rank = 0
     root_dir = "/media/zr/project/STDOG/data"
-    id = "v0_719_1"
+    id = "DPv0_0804_1"
     describe="测试带参考点的时空注意力,双3090"
     save_path = "./trained_model/"+id+"/"
     os.makedirs(os.path.dirname(save_path), exist_ok=True) 
