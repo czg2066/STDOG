@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from dataset import CustomDataset
-from model import CustomModel
+from model_st import CustomModel
 from tqdm import tqdm
 import numpy as np
 import torch.distributed as dist
@@ -257,9 +257,9 @@ if __name__ == "__main__":
         print(f"[Rank {dist.get_rank()}] Initialization finished. Using GPU: {rank}")
     else:
         rank = None
-    root_dir = "/media/czg/czg-SSD/geely_dataN2"
+    root_dir = "/media/zr/project/geelyN2"
     id = "v0_719_1"
-    describe="测试带参考点的时空注意力"
+    describe="测试带参考点的时空注意力,双3090"
     save_path = "./trained_model/"+id+"/"
     os.makedirs(os.path.dirname(save_path), exist_ok=True) 
     os.makedirs(os.path.dirname(save_path+"plots/"), exist_ok=True)
