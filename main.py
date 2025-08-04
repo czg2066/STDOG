@@ -257,16 +257,16 @@ if __name__ == "__main__":
         print(f"[Rank {dist.get_rank()}] Initialization finished. Using GPU: {rank}")
     else:
         rank = None
-    root_dir = "/media/zr/project/geelyN2"
+    root_dir = "/media/zr/project/STDOG/data"
     id = "v0_719_1"
     describe="测试带参考点的时空注意力,双3090"
     save_path = "./trained_model/"+id+"/"
     os.makedirs(os.path.dirname(save_path), exist_ok=True) 
     os.makedirs(os.path.dirname(save_path+"plots/"), exist_ok=True)
     epochs = 30
-    loop_mun = 30
-    batch_size = 6
-    num_workers = 9
+    loop_mun = 10
+    batch_size = 24
+    num_workers = 16
     resume = False
     train_towns = os.listdir(root_dir)  # Scenario FoldersFalse
     first_val_town = 'Town02'

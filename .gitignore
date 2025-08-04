@@ -2,3 +2,4 @@
 /trained_model/
 /wandb/
 /__pycache__/
+data/*
